@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# PyCPython - interpret CPython in Python
+# PyLua - interpret Lua in Python
 # by Albert Zeyer, 2011
 # code under GPL
 
