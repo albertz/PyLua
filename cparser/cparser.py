@@ -124,6 +124,11 @@ OpBinFuncs = {
 def simple_escape_char(c):
 	if c == "n": return "\n"
 	elif c == "t": return "\t"
+	elif c == "a": return "\a"
+	elif c == "b": return "\b"
+	elif c == "f": return "\f"
+	elif c == "r": return "\r"
+	elif c == "v": return "\v"
 	elif c == "0": return "\0"
 	elif c == "\n": return "\n"
 	elif c == '"': return '"'
@@ -138,7 +143,6 @@ def escape_cstr(s):
 	return s.replace('"', '\\"')
 
 def parse_macro_def_rightside(stateStruct, argnames, input):
-	assert argnames is not None
 	assert input is not None
 	if stateStruct is None:
 		class Dummy:
@@ -146,7 +150,7 @@ def parse_macro_def_rightside(stateStruct, argnames, input):
 		stateStruct = Dummy()
 
 	def f(*args):
-		args = dict(map(lambda i: (argnames[i], args[i]), range(len(argnames))))
+		args = dict(map(lambda i: (argnames[i], args[i]), range(len(argnames or ()))))
 		
 		ret = ""
 		state = 0
@@ -235,7 +239,7 @@ def parse_macro_def_rightside(stateStruct, argnames, input):
 class Macro:
 	def __init__(self, state=None, macroname=None, args=None, rightside=None):
 		self.name = macroname
-		self.args = args if (args is not None) else ()
+		self.args = args
 		self.rightside = rightside if (rightside is not None) else ""
 		self.defPos = state.curPosAsStr() if state else "<unknown>"
 		self._tokens = None
@@ -244,7 +248,7 @@ class Macro:
 	def __repr__(self):
 		return "<Macro: " + str(self) + ">"
 	def eval(self, state, args):
-		if len(args) != len(self.args): raise TypeError, "invalid number of args (" + str(args) + ") for " + repr(self)
+		if len(args) != len(self.args or ()): raise TypeError, "invalid number of args (" + str(args) + ") for " + repr(self)
 		func = parse_macro_def_rightside(state, self.args, self.rightside)
 		return func(*args)
 	def __call__(self, *args):
@@ -399,6 +403,7 @@ class State:
 		"byte": ctypes.c_byte,
 		"wchar_t": ctypes.c_wchar,
 		"size_t": ctypes.c_size_t,
+		"ptrdiff_t": ctypes.c_long,
 		"FILE": ctypes.c_int, # NOTE: not really correct but shouldn't matter unless we directly access it
 	}
 	Attribs = [
@@ -429,7 +434,8 @@ class State:
 	
 	def autoSetupSystemMacros(self):
 		import sys
-		self.macros["__GNUC__"] = self.EmptyMacro # most headers just behave more sane with this :)
+		self.macros["__GNUC__"] = Macro(rightside="4") # most headers just behave more sane with this :)
+		self.macros["__GNUC_MINOR__"] = Macro(rightside="2")
 		if sys.platform == "darwin":
 			self.macros["__APPLE__"] = self.EmptyMacro
 			self.macros["__MACH__"] = self.EmptyMacro
@@ -544,6 +550,8 @@ def cpreprocess_evaluate_ifdef(state, arg):
 def cpreprocess_evaluate_single(state, arg):
 	if arg == "": return None
 	try: return int(arg) # is integer?
+	except: pass
+	try: return long(arg) # is long?
 	except: pass
 	try: return int(arg, 16) # is hex?
 	except: pass
@@ -712,7 +720,7 @@ def cpreprocess_evaluate_cond(stateStruct, condstr):
 							neweval = macroname in stateStruct.macros
 					else:
 						if not is_valid_defname(macroname):
-							stateStruct.error("preprocessor eval call: '" + macroname + "' is not a valid macro name")
+							stateStruct.error("preprocessor eval call: '" + macroname + "' is not a valid macro name in " + repr(condstr))
 							return
 						if arg not in stateStruct.macros:
 							stateStruct.error("preprocessor eval call: '" + macroname + "' is unknown")
@@ -783,7 +791,13 @@ def cpreprocess_evaluate_cond(stateStruct, condstr):
 							if OpPrecedences[opstr] >= 6: # +,-,==, etc
 								# WARNING/HACK: guess that the following has lower or equal precedence :)
 								# HACK: add "()"
-								condstr = condstr[:i] + "(" + condstr[i:] + ")"
+								for j in xrange(i, len(condstr)):
+									if condstr[j] in OpChars:
+										while j < len(condstr) and condstr[j] in OpChars:
+											j += 1
+										if j < len(condstr):
+											condstr = condstr[:j] + "(" + condstr[j:] + ")"
+										break
 						elif opstr in OpPrefixFuncs:
 							newprefixop = OpPrefixFuncs[opstr]
 							if prefixOp: prefixOp = lambda x: prefixOp(newprefixop(x))
@@ -878,13 +892,15 @@ def cpreprocess_handle_include(state, arg):
 def cpreprocess_handle_def(stateStruct, arg):
 	state = 0
 	macroname = ""
-	args = []
+	args = None
 	rightside = ""
 	for c in arg:
 		if state == 0:
 			if c in SpaceChars:
 				if macroname != "": state = 3
-			elif c == "(": state = 2
+			elif c == "(":
+				state = 2
+				args = []
 			else: macroname += c
 		elif state == 2: # after "("
 			if c in SpaceChars: pass
@@ -1259,7 +1275,7 @@ def cpre2_parse(stateStruct, input, brackets = None):
 						macroargs = []
 						macrobrackets = []
 						state = 31
-						if len(stateStruct.macros[macroname].args) == 0:
+						if stateStruct.macros[macroname].args is None:
 							state = 32 # finalize macro directly. there can't be any args
 						breakLoop = False
 					else:
@@ -1883,8 +1899,6 @@ def _create_cast_call(stateStruct, parent, base, token):
 	return funcCall
 
 def opsDoLeftToRight(stateStruct, op1, op2):
-	if op1 == "?": return False
-	
 	try: opprec1 = OpPrecedences[op1]
 	except:
 		stateStruct.error("internal error: statement parsing: op1 " + repr(op1) + " unknown")
@@ -1993,7 +2007,7 @@ class CStatement(_CBaseWithOptBody):
 					stateStruct.error("statement parsing: " + TName + " '" + token.content + "' unknown")
 					obj = CUnknownType(name=token.content)
 				self._leftexpr = obj
-				self._state = 10
+				self._state = 5
 			else:
 				stateStruct.error("statement parsing: didn't expected token " + str(token) + " after " + TName)
 		elif self._state == 5: # after expr
@@ -2013,10 +2027,13 @@ class CStatement(_CBaseWithOptBody):
 				self._state = 40
 		elif self._state == 6: # after expr + op
 			if isinstance(token, CIdentifier):
-				obj = findObjInNamespace(stateStruct, self.parent, token.content)
-				if obj is None:
-					stateStruct.error("statement parsing: identifier '" + token.content + "' unknown")
-					obj = CUnknownType(name=token.content)
+				if token.content == "sizeof":
+					obj = CSizeofSymbol()
+				else:
+					obj = findObjInNamespace(stateStruct, self.parent, token.content)
+					if obj is None:
+						stateStruct.error("statement parsing: identifier '" + token.content + "' unknown")
+						obj = CUnknownType(name=token.content)
 				self._state = 7
 			elif isinstance(token, (CNumber,CStr,CChar)):
 				obj = token
@@ -2061,7 +2078,7 @@ class CStatement(_CBaseWithOptBody):
 		elif self._state == 8: # right-to-left chain, pull down
 			assert isinstance(self._rightexpr, CStatement)
 			self._rightexpr._cpre3_handle_token(stateStruct, token)
-			if self._rightexpr._state == 5:
+			if self._rightexpr._state in (5,7):
 				self._state = 9
 		elif self._state == 9: # right-to-left chain after op + expr
 			assert isinstance(self._rightexpr, CStatement)
@@ -2278,35 +2295,45 @@ def cpre3_parse_funcbody(stateStruct, curCObj, input_iter):
 	curCObj.finalize(stateStruct)
 
 def cpre3_parse_funcpointername(stateStruct, curCObj, input_iter):
-	CFuncPointerDecl.overtake(curCObj)
 	bracketLevel = list(curCObj._bracketlevel)
 	state = 0
 	for token in input_iter:
 		if isinstance(token, CClosingBracket):
 			if token.brackets == bracketLevel:
 				return
-			if not _isBracketLevelOk(bracketlevel, token.brackets):
+			if not _isBracketLevelOk(bracketLevel, token.brackets):
 				stateStruct.error("cpre3 parse func pointer name: internal error: bracket level messed up with closing bracket: " + str(token.brackets))
 
 		if state == 0:
 			if token == COp("*"):
 				state = 1
+				CFuncPointerDecl.overtake(curCObj)
+				curCObj.ptrLevel = 1
+			elif isinstance(token, CIdentifier):
+				CFunc.overtake(curCObj)
+				curCObj.name = token.content
+				state = 4
 			else:
 				stateStruct.error("cpre3 parse func pointer name: token " + str(token) + " not expected; expected '*'")
 		elif state == 1:
-			if isinstance(token, CIdentifier):
+			if token == COp("*"):
+				curCObj.ptrLevel += 1
+			elif isinstance(token, CIdentifier):
 				curCObj.name = token.content
 				state = 2
 			else:
 				stateStruct.error("cpre3 parse func pointer name: token " + str(token) + " not expected; expected identifier")
-		elif state == 2:
+		elif state == 2: # after identifier in func ptr
 			if token == COpeningBracket("["):
 				curCObj._bracketlevel = list(token.brackets)
 				cpre3_parse_arrayargs(stateStruct, curCObj, input_iter)
 				curCObj._bracketlevel = bracketLevel
 			else:
 				state = 3
-
+		elif state == 4: # after identifier in func
+			# we don't expect anything anymore
+			state = 3
+			
 		if state == 3:
 			stateStruct.error("cpre3 parse func pointer name: token " + str(token) + " not expected; expected ')'")
 
