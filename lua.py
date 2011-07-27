@@ -59,7 +59,11 @@ def prepareState():
 	return state
 
 state = prepareState()
-cparser.parse(LuaDir + "/src/lua.c", state) # main
+
+from glob import glob
+for fn in glob(LuaDir + "/src/*.c"):
+	print "parse", fn, "..."
+	cparser.parse(fn, state)
 
 import cparser.interpreter
 
